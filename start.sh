@@ -1,12 +1,28 @@
 #!/bin/bash
 
-# 检查是否为 root
+# 检查是否为 root，如果不是则尝试使用 sudo 重新运行
 if [ "$EUID" -ne 0 ]; then 
-    echo "请使用 sudo 运行此脚本: sudo bash $0"
-    exit 1
+    if [ -n "$CI" ] || [ -n "$GITHUB_ACTIONS" ]; then
+        echo "检测到 CI 环境，尝试以当前权限继续..."
+        # 在 CI 环境中继续执行，某些操作可能需要调整
+    elif command -v sudo >/dev/null 2>&1; then
+        echo "需要 root 权限，尝试使用 sudo 重新运行..."
+        exec sudo bash "$0" "$@"
+    else
+        echo "错误：需要 root 权限但 sudo 不可用"
+        echo "请手动使用 root 权限运行: sudo bash $0"
+        exit 1
+    fi
 fi
 
 echo "正在安装 Xray 和 Cloudflared..."
+
+# 定义命令前缀（根据权限决定是否需要 sudo）
+if [ "$EUID" -eq 0 ]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
 
 # 安装 Xray
 echo "安装 Xray-core..."
@@ -38,21 +54,21 @@ if [ ! -f "/usr/local/bin/xray" ]; then
     wget -q --show-progress $DOWNLOAD_URL -O /tmp/xray.zip
     
     # 安装 unzip
-    apt-get install -y unzip >/dev/null 2>&1
+    $SUDO apt-get install -y unzip >/dev/null 2>&1
     
     # 解压
     unzip -o /tmp/xray.zip -d /tmp/xray >/dev/null 2>&1
     
     # 移动文件
-    mkdir -p /usr/local/bin /usr/local/etc/xray /var/log/xray
-    cp /tmp/xray/xray /usr/local/bin/
-    chmod +x /usr/local/bin/xray
+    $SUDO mkdir -p /usr/local/bin /usr/local/etc/xray /var/log/xray
+    $SUDO cp /tmp/xray/xray /usr/local/bin/
+    $SUDO chmod +x /usr/local/bin/xray
     
     # 清理
     rm -rf /tmp/xray /tmp/xray.zip
     
     # 创建 systemd 服务
-    cat > /etc/systemd/system/xray.service <<'SVCEOF'
+    $SUDO bash -c 'cat > /etc/systemd/system/xray.service' <<'SVCEOF'
 [Unit]
 Description=Xray Service
 Documentation=https://github.com/xtls
@@ -73,7 +89,7 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 SVCEOF
     
-    systemctl daemon-reload
+    $SUDO systemctl daemon-reload
     echo "✓ Xray 手动安装完成"
 fi
 
@@ -85,10 +101,10 @@ else
     wget -q https://github.com/cloudflare/cloudflared/releases/download/2025.10.1/cloudflared-linux-amd64 -O cloudflared
 fi
 chmod +x cloudflared
-mv cloudflared /usr/local/bin/
+$SUDO mv cloudflared /usr/local/bin/
 
 # 停止可能存在的进程
-systemctl stop xray 2>/dev/null || true
+$SUDO systemctl stop xray 2>/dev/null || true
 pkill -f cloudflared 2>/dev/null || true
 
 # 生成 UUID
@@ -96,12 +112,12 @@ UUID=$(cat /proc/sys/kernel/random/uuid)
 echo "生成的 UUID: $UUID"
 
 # 确保配置目录存在
-mkdir -p /usr/local/etc/xray
-mkdir -p /var/log/xray
+$SUDO mkdir -p /usr/local/etc/xray
+$SUDO mkdir -p /var/log/xray
 
 # 创建 Xray 配置文件
 echo "创建 Xray 配置..."
-cat > /usr/local/etc/xray/config.json <<EOF
+$SUDO bash -c "cat > /usr/local/etc/xray/config.json" <<EOF
 {
   "log": {
     "loglevel": "info"
@@ -138,18 +154,18 @@ EOF
 
 # 启动 Xray
 echo "启动 Xray..."
-systemctl start xray
-systemctl enable xray
+$SUDO systemctl start xray
+$SUDO systemctl enable xray
 
 # 等待启动
 sleep 3
 
 # 检查 Xray 是否运行
-if systemctl is-active --quiet xray; then
+if $SUDO systemctl is-active --quiet xray; then
     echo "✓ Xray 启动成功"
 else
     echo "✗ Xray 启动失败"
-    systemctl status xray
+    $SUDO systemctl status xray
     exit 1
 fi
 
