@@ -1,10 +1,81 @@
 #!/bin/bash
 
+# 检查是否为 root
+if [ "$EUID" -ne 0 ]; then 
+    echo "请使用 sudo 运行此脚本: sudo bash $0"
+    exit 1
+fi
+
 echo "正在安装 Xray 和 Cloudflared..."
 
 # 安装 Xray
 echo "安装 Xray-core..."
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# 如果安装失败，尝试手动安装
+if [ ! -f "/usr/local/bin/xray" ]; then
+    echo "使用备用方法安装 Xray..."
+    
+    # 检测架构
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64)
+            XR_ARCH="linux-64"
+            ;;
+        aarch64|arm64)
+            XR_ARCH="linux-arm64-v8a"
+            ;;
+        *)
+            echo "不支持的架构: $ARCH"
+            exit 1
+            ;;
+    esac
+    
+    # 下载最新版本
+    DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-$XR_ARCH.zip"
+    echo "下载 Xray: $DOWNLOAD_URL"
+    
+    wget -q --show-progress $DOWNLOAD_URL -O /tmp/xray.zip
+    
+    # 安装 unzip
+    apt-get install -y unzip >/dev/null 2>&1
+    
+    # 解压
+    unzip -o /tmp/xray.zip -d /tmp/xray >/dev/null 2>&1
+    
+    # 移动文件
+    mkdir -p /usr/local/bin /usr/local/etc/xray /var/log/xray
+    cp /tmp/xray/xray /usr/local/bin/
+    chmod +x /usr/local/bin/xray
+    
+    # 清理
+    rm -rf /tmp/xray /tmp/xray.zip
+    
+    # 创建 systemd 服务
+    cat > /etc/systemd/system/xray.service <<'SVCEOF'
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    
+    systemctl daemon-reload
+    echo "✓ Xray 手动安装完成"
+fi
 
 # 安装 Cloudflared
 ARCH=$(uname -m)
@@ -14,19 +85,23 @@ else
     wget -q https://github.com/cloudflare/cloudflared/releases/download/2025.10.1/cloudflared-linux-amd64 -O cloudflared
 fi
 chmod +x cloudflared
-sudo mv cloudflared /usr/local/bin/
+mv cloudflared /usr/local/bin/
 
 # 停止可能存在的进程
-sudo systemctl stop xray 2>/dev/null || true
+systemctl stop xray 2>/dev/null || true
 pkill -f cloudflared 2>/dev/null || true
 
 # 生成 UUID
 UUID=$(cat /proc/sys/kernel/random/uuid)
 echo "生成的 UUID: $UUID"
 
+# 确保配置目录存在
+mkdir -p /usr/local/etc/xray
+mkdir -p /var/log/xray
+
 # 创建 Xray 配置文件
 echo "创建 Xray 配置..."
-sudo tee /usr/local/etc/xray/config.json > /dev/null <<EOF
+cat > /usr/local/etc/xray/config.json <<EOF
 {
   "log": {
     "loglevel": "info"
@@ -63,18 +138,18 @@ EOF
 
 # 启动 Xray
 echo "启动 Xray..."
-sudo systemctl start xray
-sudo systemctl enable xray
+systemctl start xray
+systemctl enable xray
 
 # 等待启动
 sleep 3
 
 # 检查 Xray 是否运行
-if sudo systemctl is-active --quiet xray; then
+if systemctl is-active --quiet xray; then
     echo "✓ Xray 启动成功"
 else
     echo "✗ Xray 启动失败"
-    sudo systemctl status xray
+    systemctl status xray
     exit 1
 fi
 
@@ -155,10 +230,10 @@ if [ -n "$PUBLIC_URL" ]; then
 fi
 echo ""
 echo "【管理命令】"
-echo "查看状态: sudo systemctl status xray"
-echo "查看日志: sudo journalctl -u xray -f"
-echo "停止服务: sudo systemctl stop xray"
-echo "重启服务: sudo systemctl restart xray"
+echo "查看状态: systemctl status xray"
+echo "查看日志: journalctl -u xray -f"
+echo "停止服务: systemctl stop xray"
+echo "重启服务: systemctl restart xray"
 echo "查看隧道: cat cloudflared.log"
 echo ""
 echo "=================================================="
